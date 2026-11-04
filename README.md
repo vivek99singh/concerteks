@@ -1,140 +1,308 @@
-# IBM Concert 3.1.0 on EKS: L3 Demo Build
+# IBM Concert 3.1.0 on Amazon EKS
 
-Rebuild of the August 2026 EKS install (`../EKS/IBM_Concert_Platform_3.0_EKS_Installation_Guide.md`) on **Concert v3.1.0**
-(released 2026-10-01). It installs **Hub + Concert + Data Apps + Workflows**, with AI on. Secure Coder is not installed.
-The demo script doesn't use Data Apps; it is included so the environment is complete.
+Automated install of **IBM Concert v3.1.0** on a new Amazon EKS cluster. It covers the **Hub, Concert, Data Apps and
+Workflows** components, with watsonx.ai enabled. It also loads demo data for an L3 demo, built from three real OWASP
+apps (**Juice Shop, WebGoat and WrongSecrets**) running on the same cluster.
 
-Demo data comes from three real OWASP apps that run on the same cluster: **Juice Shop, WebGoat and WrongSecrets**.
-The demo script is in [`Concert_3.1_L3_Demo_Script.md`](Concert_3.1_L3_Demo_Script.md).
+You can run it in two ways:
+- **GitHub Actions pipeline.** Click *Run workflow* and wait about 2 hours. No laptop needs to stay open.
+- **One local command,** `./run-all.sh`, from a Mac or Linux machine.
 
-## One command (from the Mac)
-```bash
-cp secrets.env.example secrets.env && chmod 600 secrets.env   # fill in the keys once
-./run-all.sh                   # cluster -> install -> post-install -> demo data (~2 h)
-./run-all.sh --from install    # re-run from a stage after fixing a failure
-./scripts/99-teardown.sh       # delete everything afterwards
+Secure Coder is not installed.
+
+---
+
+## Contents
+- [What gets built](#what-gets-built)
+- [Prerequisites](#prerequisites)
+- [Option A: GitHub Actions pipeline](#option-a-github-actions-pipeline)
+- [Option B: run locally](#option-b-run-locally)
+- [After the install: one-time UI steps](#after-the-install-one-time-ui-steps)
+- [Teardown](#teardown)
+- [Repository layout](#repository-layout)
+- [Configuration reference](#configuration-reference)
+- [Troubleshooting and known issues](#troubleshooting-and-known-issues)
+- [Demo material](#demo-material)
+
+---
+
+## What gets built
+
+```mermaid
+flowchart LR
+  subgraph AWS["AWS account (default VPC)"]
+    subgraph EKS["EKS cluster: concert-demo"]
+      direction TB
+      HUB["concert-hub<br/>Hub + Keycloak + ITOM agents"]
+      CON["concert<br/>Concert"]
+      DA["dataapps<br/>Data Apps"]
+      WF["ibm-concert-workflows<br/>Workflows"]
+      DEMO["demo-apps<br/>juice-shop · webgoat · wrongsecrets"]
+      NGX["concert-ingress-nginx"]
+    end
+    EBS[("EBS gp2/gp3<br/>RWO volumes")]
+    EFS[("EFS efs-sc<br/>RWX volumes")]
+    ELB1["ELB: Concert UI"]
+    ELB2["ELB: Workflows"]
+  end
+  WX["watsonx.ai (SaaS)"]
+  ICR["cp.icr.io<br/>entitled registry"]
+  ELB1 --> NGX --> CON & HUB
+  ELB2 --> WF
+  CON & HUB --> WX
+  EKS -. pulls images .-> ICR
+  CON & HUB --> EBS
+  CON --> EFS
 ```
-`run-all.sh` pauses once, after install, for you to generate a Concert API key in the UI (unless
-`CONCERT_API_KEY` is already set). The installer runs **inside the cluster as a Job**, so CloudShell is not
-needed, and closing the laptop doesn't stop the install; re-running re-attaches to the Job's logs.
-The Workflows and GitHub UI steps in section 2 stay manual. The manual steps below still work if you want to run stages yourself.
 
-## CI pipeline (GitHub Actions)
-The same stages run from **Actions** in this repo, so no laptop needs to stay open. Every workflow is started manually (`workflow_dispatch`).
+| Stage | Script | What it does | Time |
+|---|---|---|---|
+| 1. cluster | `scripts/00-create-cluster.sh`, `00b-create-efs.sh` | IAM roles, EKS control plane, add-ons (VPC CNI, CoreDNS, EBS CSI, EFS CSI, metrics-server), node group, EFS file system + `efs-sc` StorageClass | 25–35 min |
+| 2. install | `scripts/01-install-in-cluster.sh` → `01-install-concert.sh` | Runs IBM's installer **as a Kubernetes Job inside the cluster** (Amazon Linux 2023). It survives laptop sleep and dropped CI connections; re-running re-attaches to the logs | 60–90 min |
+| 3. post-install | `scripts/02-post-install.sh` | NGINX ingress, Concert + Keycloak routes, Keycloak SSO setup, watsonx credentials, Home menu, health checks | 10 min |
+| 4. demo data | `demo-data/load-demo-data.sh all` | Deploys the 3 OWASP apps, runs Trivy (and Semgrep) scans, builds ConcertDef SBOMs and a certificate inventory, and uploads all of it to Concert | 20–30 min |
 
-| Workflow | What it does | Time |
-|---|---|---|
-| **Install Concert on EKS** (`install.yml`) | 1. cluster + EFS → 2. installer Job in the cluster → 3. ingress, Keycloak SSO, watsonx, health check. Input `start_from` re-runs from a later stage | ~2 h |
-| **Load demo data** (`demo-data.yml`) | Demo apps, Trivy/Semgrep scans, SBOMs, certificates, upload to Concert, cert-renewal RBAC | ~30 min |
-| **Teardown EKS** (`teardown.yml`) | `99-teardown.sh` with the cluster name typed as confirmation | ~20 min |
-| **Lint** (`lint.yml`) | `bash -n`, Python syntax and shellcheck on every push | 1 min |
+Default size: **3 × 16 vCPU / 32 GB nodes**, 512 GB disk, all in `us-east-1b`. The full install requests about 34 vCPU,
+so 2 nodes are not enough. All nodes sit in one AZ because EBS volumes are zonal.
 
-**Repo secrets** (Settings → Secrets and variables → Actions):
+**Cost:** about USD 2–3 per hour on On-Demand nodes, plus the EKS control plane, ELBs and EFS. Tear it down when you're finished.
 
-| Secret | Notes |
+---
+
+## Prerequisites
+
+| Item | Where to get it |
 |---|---|
-| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (+ `AWS_SESSION_TOKEN` if temporary) | IAM identity allowed to create EKS, EC2, EFS and IAM roles |
-| `IBM_ENTITLEMENT_KEY`, `WATSONX_API_KEY`, `WATSONX_API_PROJECT_ID`, `CONCERT_ADMIN_PASSWORD` | Same as `secrets.env` |
-| `CONCERT_API_KEY` | Only for **Load demo data**. Generate it in the Concert UI after install |
+| AWS account + IAM identity that can create EKS, EC2, EFS, ELB and IAM roles | AWS admin |
+| IBM entitlement key | https://myibm.ibm.com/products-services/containerlibrary |
+| watsonx.ai API key + project ID | IBM Cloud → watsonx.ai Runtime. Use the **Essentials** plan; the Lite plan's token quota runs out within an hour |
+| Concert admin password | Choose one. It is used for the `admin` user |
+| GitHub forks of `juice-shop`, `WebGoat`, `wrongsecrets` | Only needed for demo data and SAST. Default owner `vivek99singh` |
 
-**Repo variables** (optional):
+For local runs you also need `aws`, `kubectl`, `helm`, `docker` (colima on a Mac), `trivy`, `python3`, `curl` and bash 4+.
+`semgrep` is optional.
 
-| Variable | Default | Notes |
+---
+
+## Option A: GitHub Actions pipeline
+
+### 1. Add secrets and variables
+**Settings → Secrets and variables → Actions**
+
+| Secret | Required for | Notes |
 |---|---|---|
-| `EXTRA_ADMIN_ARNS` | none | Space-separated IAM ARNs given cluster-admin. Put your own user here; otherwise only the pipeline's identity can use kubectl |
-| `RUNNER_LABELS` | `"ubuntu-latest"` | JSON. For a self-hosted runner, e.g. `["self-hosted","linux","x64"]` |
-| `WATSONX_API_URL` | `https://eu-gb.ml.cloud.ibm.com` | |
-| `DEMO_ALLOWED_CIDR` | runner's IP | Who can reach the demo app LBs, e.g. `203.0.113.7/32` |
-| `DEMO_GITHUB_USER` | `vivek99singh` | Owner of the juice-shop / WebGoat / wrongsecrets forks |
+| `AWS_ACCESS_KEY_ID` | all | Ideally a dedicated CI IAM user |
+| `AWS_SECRET_ACCESS_KEY` | all | |
+| `AWS_SESSION_TOKEN` | optional | Only for temporary credentials. They usually expire before a 2-hour install finishes |
+| `IBM_ENTITLEMENT_KEY` | install | |
+| `WATSONX_API_KEY` | install | |
+| `WATSONX_API_PROJECT_ID` | install | |
+| `CONCERT_ADMIN_PASSWORD` | install | |
+| `CONCERT_API_KEY` | demo data | Generate it in the Concert UI **after** the install (see below) |
 
-Flow: run **Install** → log in and generate the API key → save it as `CONCERT_API_KEY` → run **Load demo data** →
-do the UI steps in section 2 → run **Teardown** when finished. The runner needs Linux x86_64 with bash, curl, python3 and docker
-(GitHub's `ubuntu-latest` has these); aws, kubectl, helm, trivy and semgrep are installed if missing.
+| Variable (optional) | Default | Notes |
+|---|---|---|
+| `EXTRA_ADMIN_ARNS` | none | Space-separated IAM ARNs given cluster-admin. **Add your own IAM user/role**; otherwise only the pipeline's identity can use `kubectl` |
+| `WATSONX_API_URL` | `https://eu-gb.ml.cloud.ibm.com` | Region of your watsonx.ai instance |
+| `DEMO_ALLOWED_CIDR` | runner's IP | Who can reach the demo app load balancers, e.g. `203.0.113.7/32` |
+| `DEMO_GITHUB_USER` | `vivek99singh` | Owner of the OWASP app forks |
+| `RUNNER_LABELS` | `"ubuntu-latest"` | JSON. For a self-hosted runner: `["self-hosted","linux","x64"]` |
+
+With the GitHub CLI:
+```bash
+gh secret set IBM_ENTITLEMENT_KEY          # prompts for the value
+gh secret set -f secrets.env               # or load several from a dotenv file
+gh variable set EXTRA_ADMIN_ARNS --body "$(aws sts get-caller-identity --query Arn --output text)"
+```
+
+### 2. Run the workflows (Actions tab)
+
+| Workflow | When | Inputs |
+|---|---|---|
+| **Install Concert on EKS** | First | `cluster`, `region`, `node_az`, `capacity_type` (ON_DEMAND / SPOT), `node_count`, `concert_version`, `start_from` (cluster / install / post-install) |
+| **Load demo data** | After you have set `CONCERT_API_KEY` | `step` (all, deploy, scan, …), `allowed_cidr`, `cert_renewal` |
+| **Teardown EKS** | When you're finished | `cluster`, `region`, `confirm` (type the cluster name) |
+| **Lint** | Automatically on every push | none |
+
+The install run ends with a summary that shows the **Concert and Workflows URLs**.
+
+```mermaid
+flowchart LR
+  A["Install Concert on EKS<br/>~2 h"] --> B["Log in to Concert<br/>generate API key"]
+  B --> C["Save as secret<br/>CONCERT_API_KEY"]
+  C --> D["Load demo data<br/>~30 min"]
+  D --> E["One-time UI steps<br/>~10 min"]
+  E --> F["Demo"]
+  F --> G["Teardown EKS"]
+```
+
+**If a stage fails:** fix the cause and re-run **Install** with `start_from` set to the failed stage. Every stage is
+idempotent. If the runner dies during stage 2, the installer Job keeps running in the cluster, and `start_from=install` re-attaches to it.
+
+> **Runners:** `ubuntu-latest` on github.com has everything the pipeline needs. Some GitHub Enterprise instances turn
+> Actions off for personal repositories (github.ibm.com does). There, either move the repo to an org that has Actions
+> and a runner, or use Option B.
+
+---
+
+## Option B: run locally
+
+```bash
+git clone <this repo> && cd <repo>
+cp secrets.env.example secrets.env && chmod 600 secrets.env   # fill in the keys
+./run-all.sh                     # cluster -> install -> post-install -> demo data (~2.5 h)
+```
+
+- `run-all.sh` records finished stages in `.run-state`. Running it again resumes after the last completed stage.
+- `./run-all.sh --from install` re-runs from a given stage (`cluster | install | post-install | demo-data`).
+- It pauses once, after the install, so you can paste the Concert API key, unless `CONCERT_API_KEY` is already in `secrets.env`.
+- On a Mac it keeps the machine awake with `caffeinate`. Logs go to `logs/run-all-<time>.log`.
+- Any stage can also be run on its own. Each script documents its env vars at the top:
+
+```bash
+export CLUSTER=concert-demo REGION=us-east-1 CAPACITY_TYPE=ON_DEMAND
+./scripts/00-create-cluster.sh
+./scripts/01-install-in-cluster.sh
+./scripts/02-post-install.sh
+(cd demo-data && ./load-demo-data.sh all)
+```
+
+---
+
+## After the install: one-time UI steps
+
+Open the Concert URL and choose **Log in with SSO**. Log in as user `admin` with `CONCERT_ADMIN_PASSWORD`, and accept the self-signed certificate warning.
+
+1. **API key:** profile (top right) → **API key** → Generate. Save it as `CONCERT_API_KEY`, either as a secret for the pipeline
+   or in `secrets.env` for local runs. The value shown is already in the `C_API_KEY` format the toolkit needs.
+2. **Workflows → Authentications → Create:** name `concert-self`, service **IBM Hub - Self**. Discovery and AI workflows need it.
+3. **Administration → Integrations → Connections → GitHub:** host `https://api.github.com/` and a fine-grained PAT that has
+   Issues read/write access on the forks. Enable **Issues** on the `juice-shop` fork, because forks have Issues off by default.
+4. Check that **Ask watsonx** answers.
+5. Wait about 15 minutes for ingestion (**Integrations → Ingestion jobs**).
+6. Optional: import `workflows/Renew_EKS_TLS_Certificate.yaml` into Workflows to demo certificate renewal (see the deep dive).
+
+---
+
+## Teardown
+
+Run the **Teardown EKS** workflow, or locally:
+```bash
+./scripts/99-teardown.sh          # asks you to type the cluster name
+```
+The script works in an order that avoids orphaned resources:
+1. Deletes the LoadBalancer services, so Kubernetes removes their ELBs.
+2. Deletes the node group, then the cluster.
+3. Deletes the EFS mount targets and file system, the EFS security group, and leftover tagged EBS volumes.
+
+IAM roles are kept, because they are free and reused on the next build. Check **EC2 → Security groups** for the two `k8s-elb-*` groups; they sometimes need deleting by hand.
+
+---
+
+## Repository layout
 
 ```
-EKS-3.1/
-├── .github/workflows/             # CI pipeline (above)
-├── run-all.sh                     # Mac: runs every stage below in order, resumable (.run-state)
-├── secrets.env.example            # copy to secrets.env (not shared)
-├── params.ini                     # 3.1.0 params, filled in by 01-install-concert.sh
+.
+├── .github/
+│   ├── actions/setup/action.yml      # installs aws/kubectl/helm(/trivy/semgrep), AWS creds, kubeconfig
+│   └── workflows/
+│       ├── install.yml               # Install Concert on EKS (stages 1-3)
+│       ├── demo-data.yml             # Load demo data (stage 4)
+│       ├── teardown.yml              # Teardown EKS
+│       └── lint.yml                  # bash -n / py_compile / shellcheck on push
+├── run-all.sh                        # local end-to-end runner (resumable)
+├── params.ini                        # Concert installer params (placeholders filled at install time)
+├── secrets.env.example               # template for secrets.env (gitignored)
 ├── scripts/
-│   ├── 00-create-cluster.sh       # Mac: IAM roles, EKS 1.36, add-ons, 2 x c5.4xlarge On-Demand
-│   ├── 01-install-in-cluster.sh   # Mac: runs 01-install-concert.sh as a Job in the cluster
-│   ├── 01-install-concert.sh      # Linux (Job or CloudShell): storage class, download, Workflows LB, params, setup
-│   ├── 02-post-install.sh         # NGINX, Concert ingress, health checks, URLs
-│   └── 99-teardown.sh             # ELBs -> node group -> cluster -> leftover EBS volumes
+│   ├── 00-create-cluster.sh          # IAM roles, EKS, add-ons, node group
+│   ├── 00b-create-efs.sh             # EFS + efs-sc StorageClass (RWX for roja-buddy)
+│   ├── 01-install-in-cluster.sh      # wraps the installer in a Kubernetes Job (+ PDB)
+│   ├── 01-install-concert.sh         # downloads the 3.1.0 package, fills params.ini, runs setup
+│   ├── 02-post-install.sh            # ingress, Keycloak SSO, watsonx, health checks
+│   ├── 03-fill-resilience-metrics.py # fills in resilience assessment metrics through the API
+│   ├── 05-cert-renewal-setup.sh      # cluster RBAC/secrets for the certificate renewal workflow
+│   ├── cert-renewal/renew.sh         # script the renewal Job runs
+│   └── 99-teardown.sh                # deletes everything that costs money
 ├── demo-data/
-│   ├── demo-apps.yaml             # juice-shop / webgoat / wrongsecrets (LBs locked to your IP)
-│   └── load-demo-data.sh          # Mac: deploy, scan, SBOMs, certs, compliance, upload
-└── Concert_3.1_L3_Demo_Script.md
+│   ├── demo-apps.yaml                # juice-shop / webgoat / wrongsecrets deployments + LBs
+│   ├── load-demo-data.sh             # deploy, scan, sbom, certs, upload (see ./load-demo-data.sh)
+│   └── make-deploy-sboms.py          # ConcertDef 1.0.2 deploy SBOMs
+├── workflows/
+│   └── Renew_EKS_TLS_Certificate.yaml # Concert Workflows definition (import in the Workflows UI)
+├── docs/
+│   ├── deep-dive/README.md           # full build log with screenshots
+│   └── ticket-walkthrough/           # "Open ticket" to GitHub, step by step
+└── Concert_3.1_L3_Demo_Script.md / _Transcript.md / *.docx
 ```
 
-## What changed from the 3.0.0 guide
+IBM's Hub and ITOM helper scripts (`setup-keycloak.sh` and others) are **not** stored here. `02-post-install.sh`
+downloads them from the public release `github.com/IBM/Concert/releases/download/<version>/ibm-concert-x86.tar.gz` and
+caches them in `~/.cache/ibm-concert-<version>`.
 
-| 3.0.0 guide section | 3.1.0 |
+---
+
+## Configuration reference
+
+Environment variables read by the scripts (all optional unless noted):
+
+| Variable | Default | Used by |
+|---|---|---|
+| `CLUSTER` / `REGION` | `concert-demo` / `us-east-1` | all |
+| `NODE_AZ` | `us-east-1b` | cluster, EFS |
+| `NODE_COUNT` | `3` | cluster |
+| `CAPACITY_TYPE` | `SPOT` locally, `ON_DEMAND` in the pipeline | cluster |
+| `NODE_TYPES` | seven 16 vCPU types (`c5.4xlarge m6i.4xlarge …`) | cluster |
+| `NODE_DISK_GB` | `512` | cluster |
+| `K8S_VERSION` | EKS default version | cluster |
+| `EXTRA_ADMIN_ARNS` | none | cluster: extra EKS access entries with cluster-admin |
+| `IBM_ENTITLEMENT_KEY`, `WATSONX_API_KEY`, `WATSONX_API_PROJECT_ID`, `CONCERT_ADMIN_PASSWORD` | **required** | install, post-install |
+| `WATSONX_API_URL` | `https://eu-gb.ml.cloud.ibm.com` | install, post-install |
+| `CONCERT_VERSION` | `v3.1.0` | install, post-install |
+| `CONCERT_API_KEY` | **required** for upload | demo data, cert renewal |
+| `DEMO_ALLOWED_CIDR` | caller's public IP `/32` | demo data |
+| `GITHUB_USER` | `vivek99singh` | demo data (fork owner) |
+| `CONFIRM_CLUSTER` | none (prompts) | teardown, non-interactive |
+
+The Concert installer itself is configured in `params.ini`: namespaces, scale level, storage classes, `ENABLE_AI` and
+`ENABLE_CROSS_PRODUCT_INTEGRATION=true`.
+
+---
+
+## Troubleshooting and known issues
+
+These were found on the first real 3.1.0 install, and the fixes are already in the scripts:
+
+| Symptom | Cause / fix |
 |---|---|
-| Package dirs `ibm-concert-k8s-workflows/…` | Now `concert/`, `concert-workflows/`, `dataapps/`. Workflows LB file: `concert-workflows/bin/aws-eks/service-cw-ext.yaml` (unchanged content) |
-| §11 watsonx.ai: patch `app-cfg-cm` after install | **Not needed.** `ENABLE_AI=true`, `WATSONX_API_URL` and `WATSONX_API_PROJECT_ID` go in params.ini, and `WATSONX_API_KEY` is exported before setup |
-| §13 `register-agents.sh` | 3.1.0 ITOM ships an agent-card registry **job** plus product agent cards. Check after install; use the old script only if agents are missing |
-| `ENABLE_CROSS_PRODUCT_INTEGRATION` | Set to `true`. It was blank in the 3.0.0 `params.ini`, which is why ITOM/agents were missing |
-| New params | `ENABLE_HPA` (left `false`) |
-| New tools | `bin/uninstall-products-on-k8s`, `bin/set-byo-secret` |
-| `setup` flags | Unchanged: `--license_acceptance --username --password --registry_password` |
-| Registry | The 3.1.0 sample says `icr.io/cp`, but setup's own default is `cp.icr.io/cp`. We keep `cp.icr.io/cp` (worked in 3.0.0). If images fail to pull, try `icr.io/cp` |
+| `roja-buddy exceeded its progress deadline` | roja-buddy (new in 3.1) needs **ReadWriteMany** volumes, which EBS can't provide. Fixed with EFS + `FILE_STORAGE_CLASS_CONCERT=efs-sc` |
+| Pods stuck `Pending` (CPU) | The full install requests about 34 vCPU, so use 3 nodes of 16 vCPU |
+| Install killed halfway on Spot | Spot rebalances drained the installer. The Job now has a PDB; use `ON_DEMAND` for demos |
+| Home / AI gateway menus missing | ITOM needs `jq` in the installer. The Job installs it, and post-install re-applies the menu |
+| Concert URL returns **503** | The ingress must target `ibm-concert-solis-gw-svc:11443`, not `ibm-concert-external-gw-svc` |
+| SAST/SBOM upload returns **413** | The ingress needs `proxy-body-size: 0` |
+| Login: *OIDC client credentials could not be loaded* | Route `/sys/internal/kc` to `ibm-solis-hub-gw-svc:11443`, then run `setup-keycloak.sh` (post-install does both) |
+| *watsonx isn't connected* | `ENABLE_AI` didn't write the credentials. Post-install patches `app-cfg-secret` (concert) and creates `itom-external-secrets` (concert-hub) |
+| watsonx `403 token_quota_reached` | The Lite plan is used up by the Hub agents. Switch to Essentials |
+| Workflows Kubernetes blocks return **401** | The authentication `apiKey` must be the raw service-account token, **without** a `Bearer ` prefix |
+| Renew dialog: *no trackable workflow ID was returned* | Expose renewal workflows with **Asynchronous execution**. Keep `Certificate_Flow_Orchestrator` synchronous |
+| Vulnerability page "Open ticket": *object_id cannot be empty* | Open tickets from Inventory → Applications → app → version → CVE findings → **+ Open ticket** instead |
+| Toolkit upload `CNCRTRCOVAL10187E` | Pin `ibm-concert-toolkit:v3.1.0`. The newer toolkit writes ConcertDef 2.0.0, which 3.1.0 rejects |
 
-Unchanged lessons from 3.0.0: run the installer from CloudShell, not macOS. Set a default storage class first.
-Use NGINX buffers `"8 64k"`. Workflows needs its own LB.
-
-## Order of operations
-
-### 0. Cluster: follow sections 2–6 of the 3.0.0 guide, with these differences
-- **Nodes:** 2 × Spot, 16 vCPU / 32 GB, 512 GB disk, all in us-east-1b (EBS volumes are zonal). August ran Concert + Data Apps + Workflows on 2 × c5.4xlarge.
-- **Demo day:** use **On-Demand**, not Spot, for the node group. A Spot reclaim mid-demo takes Concert down for 15+ minutes.
-- Keep the **EBS CSI driver** add-on and the IAM access entry for your CLI user.
-
-### 1. Install (CloudShell)
-Upload the `EKS-3.1` folder to CloudShell (Actions → Upload file, as a zip), then:
+Useful commands:
 ```bash
-export IBM_ENTITLEMENT_KEY=...  WATSONX_API_KEY=...  WATSONX_API_PROJECT_ID=...  CONCERT_ADMIN_PASSWORD=...
-cd EKS-3.1/scripts
-nohup ./01-install-concert.sh > ~/concert-install.log 2>&1 &
-tail -f ~/concert-install.log          # wait for "DEPLOYMENT SUCCESSFUL"
-./02-post-install.sh                   # prints Concert + Workflows URLs
+kubectl get pods -A | grep -Ev 'Running|Completed'          # anything unhealthy
+kubectl logs job/concert-install -n concert-installer --tail=100   # failed installer
+kubectl get pvc -A | grep -v Bound                          # storage problems
 ```
 
-### 2. One-time UI configuration
-1. **Workflows → Authentications → Create**: name `concert-self`, service **IBM Hub - Self**. Without this, discovery and AI workflows can't call Concert.
-2. **Concert → Administration → Integrations → Connections → GitHub**: host `api.github.com` and a PAT with `repo` scope. This is used to open real tickets.
-   Enable **Issues** on the `vivek99singh/juice-shop` fork, because forks have Issues off by default.
-3. **Concert → profile → API key**: generate one and export it as `CONCERT_API_KEY` for the data loader.
-4. Check that the watsonx chat ("Ask watsonx") answers. If it doesn't, fall back to §11 of the 3.0.0 guide.
+Still open on 3.1.0: CVE findings don't link to environments or deployments, so the risk score equals the CVSS score.
 
-### 3. Demo data (from your Mac)
-```bash
-colima start                                   # docker for the Concert toolkit
-aws eks update-kubeconfig --name concert-demo --region us-east-1
-export CONCERT_API_KEY=...
-cd EKS-3.1/demo-data
-./load-demo-data.sh all                        # deploy -> scan -> sbom -> certs -> upload
-./load-demo-data.sh compliance                 # optional: EKS CIS benchmark
-./load-demo-data.sh upload-compliance          # format accepted by 3.1 still to be verified
-```
-Allow about 15 minutes after upload for Concert to finish processing (Integrations → Ingestion jobs).
-Then fill in the "Values to capture" table at the top of the demo script.
+---
 
-### 4. Teardown (in this order, or ELBs are orphaned)
-```bash
-kubectl delete namespace demo-apps                                   # 3 app ELBs
-kubectl delete svc -n concert-workflows solis-gw-ext                 # Workflows ELB
-helm uninstall concert-ingress-nginx -n concert-ingress-nginx        # Concert ELB
-```
-Then delete the node group and the cluster, check EC2 → Volumes for leftover EBS volumes, and remove the IAM roles. This is the same as §16 of the 3.0.0 guide.
+## Demo material
 
-## Open items to verify on the live system
-| Item | Why |
-|---|---|
-| Resilience data path | The toolkit has no resilience upload type; IBM sources metrics from Instana/ITSM. We need to check the 3.1 API and Workflows integration packages for a way to feed NFR metrics (for example multi-zone %). See demo script §1 |
-| `compliance-posture` format | The toolkit accepts the key, but it is not yet confirmed that a Trivy CIS JSON is the format 3.1 expects. Fallback: NIST 800-53 catalog + profile + assessment in the UI |
-| Agent auto-registration | Confirm the agents are present. If not, adapt `../EKS/register-agents.sh`, which has a hard-coded secret, so read it from `access-keys-secret` |
-| Home page dimension wheel | On OCP the 3.0 Home returned 401 without TurboLite. Check on 3.1 |
-| ingress-nginx | The upstream project is in maintenance-only mode. It still works for this demo; the AWS Load Balancer Controller is the long-term option |
+- [`Concert_3.1_L3_Demo_Script.md`](Concert_3.1_L3_Demo_Script.md): the click-by-click demo script, with a "Values to capture" table to fill in after ingestion
+- [`Concert_3.1_L3_Demo_Transcript.md`](Concert_3.1_L3_Demo_Transcript.md): the spoken narration
+- `Concert_3.1_L3_Recording_Script.docx`: recording cues (generated by `build_recording_script.py`)
+- [`docs/deep-dive/README.md`](docs/deep-dive/README.md): the full build log with screenshots
+- [`docs/ticket-walkthrough/`](docs/ticket-walkthrough/): screenshots of creating a GitHub issue from a CVE finding
