@@ -22,7 +22,6 @@ Secure Coder is not installed.
 - [Repository layout](#repository-layout)
 - [Configuration reference](#configuration-reference)
 - [Troubleshooting and known issues](#troubleshooting-and-known-issues)
-- [Further reading](#further-reading)
 
 ---
 
@@ -180,7 +179,7 @@ Open the Concert URL and choose **Log in with SSO**. Log in as user `admin` with
    Issues read/write access on the forks. Enable **Issues** on the `juice-shop` fork, because forks have Issues off by default.
 4. Check that **Ask watsonx** answers.
 5. Wait about 15 minutes for ingestion (**Integrations → Ingestion jobs**).
-6. Optional: import `workflows/Renew_EKS_TLS_Certificate.yaml` into Workflows to demo certificate renewal (see the deep dive).
+6. Optional: import `workflows/Renew_EKS_TLS_Certificate.yaml` into Workflows to demo certificate renewal (run `scripts/05-cert-renewal-setup.sh` first).
 
 ---
 
@@ -227,11 +226,8 @@ IAM roles are kept, because they are free and reused on the next build. Check **
 │   ├── demo-apps.yaml                # juice-shop / webgoat / wrongsecrets deployments + LBs
 │   ├── load-demo-data.sh             # deploy, scan, sbom, certs, upload (see ./load-demo-data.sh)
 │   └── make-deploy-sboms.py          # ConcertDef 1.0.2 deploy SBOMs
-├── workflows/
-│   └── Renew_EKS_TLS_Certificate.yaml # Concert Workflows definition (import in the Workflows UI)
-└── docs/
-    ├── deep-dive/README.md           # full build log with screenshots
-    └── ticket-walkthrough/           # "Open ticket" to GitHub, step by step
+└── workflows/
+    └── Renew_EKS_TLS_Certificate.yaml # Concert Workflows definition (import in the Workflows UI)
 ```
 
 IBM's Hub and ITOM helper scripts (`setup-keycloak.sh` and others) are **not** stored here. `02-post-install.sh`
@@ -296,9 +292,3 @@ kubectl get pvc -A | grep -v Bound                          # storage problems
 
 Still open on 3.1.0: CVE findings don't link to environments or deployments, so the risk score equals the CVSS score.
 
----
-
-## Further reading
-
-- [`docs/deep-dive/README.md`](docs/deep-dive/README.md): the full build log with screenshots
-- [`docs/ticket-walkthrough/`](docs/ticket-walkthrough/): screenshots of creating a GitHub issue from a CVE finding
