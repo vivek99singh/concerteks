@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds and uploads the Concert L3 demo data for juice-shop, WebGoat and wrongsecrets
+# Builds and uploads optional Concert sample data for juice-shop, WebGoat and wrongsecrets
 # running on the EKS cluster. Runs on macOS (bash 3.2 OK) or Linux.
 #
 # Needs: docker (colima start), trivy, kubectl pointing at the EKS cluster, python3, aws cli.

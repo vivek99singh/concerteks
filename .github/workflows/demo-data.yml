@@ -1,6 +1,6 @@
 # Deploys juice-shop / WebGoat / WrongSecrets, scans them and uploads apps, scans and certificates to Concert.
 # Run after install.yml, once the CONCERT_API_KEY secret is set (Concert UI -> profile -> API key).
-name: Load demo data
+name: Load sample data
 
 on:
   workflow_dispatch:

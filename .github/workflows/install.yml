@@ -1,6 +1,6 @@
 # Creates the EKS cluster and installs IBM Concert 3.1.0 (Hub + Concert + Data Apps + Workflows) on it.
 # Same stages as run-all.sh: cluster -> install (in-cluster Job) -> post-install.
-# Demo data needs a Concert API key from the UI, so it is a separate workflow (demo-data.yml).
+# Sample data needs a Concert API key from the UI, so it is a separate, optional workflow (demo-data.yml).
 name: Install Concert on EKS
 
 on:
@@ -140,5 +140,5 @@ jobs:
           | Workflows | https://$wf |
 
           **Next (manual, ~10 min):** generate an API key in Concert (profile → API key), save it as the
-          \`CONCERT_API_KEY\` repo secret, then run **Load demo data**. See README §2 for the other UI steps.
+          \`CONCERT_API_KEY\` repo secret, then (optionally) run **Load sample data**. See "First steps in Concert" in the README.
           EOF

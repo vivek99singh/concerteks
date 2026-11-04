@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# End-to-end build of the Concert 3.1.0 L3 demo on EKS, run from this Mac:
-#   cluster -> install (in-cluster Job) -> post-install -> [pause: Concert API key] -> demo data
+# End-to-end build of IBM Concert 3.1.0 on EKS, run from macOS or Linux:
+#   cluster -> install (in-cluster Job) -> post-install -> [pause: Concert API key] -> sample data
 #
 # Usage:
 #   cp secrets.env.example secrets.env && chmod 600 secrets.env   # fill in once
