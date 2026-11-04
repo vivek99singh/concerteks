@@ -1,0 +1,15 @@
+# secrets and credentials
+secrets.env
+discovery-connection/
+# generated / local output
+logs/
+demo-data/work/
+.run-state
+.run-state.bak
+~$*
+LOCAL-URLS.md
+.DS_Store
+__pycache__/
+# IBM package scripts: 02-post-install.sh downloads them from the public 3.1.0 release instead
+scripts/hub-bin/
+scripts/itom/

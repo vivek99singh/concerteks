@@ -1,0 +1,176 @@
+name: Renew_EKS_TLS_Certificate
+path: /User/Renew_EKS_TLS_Certificate
+platform: node
+variables:
+  - name: certificates
+    required: false
+    isInput: true
+    isOutput: false
+    level: INTERMEDIATE
+    type:
+      type: array
+    value: |-
+      [
+        {
+          "serial_number": "205462551676156838810214027963990339516",
+          "subject": "CN=juice-shop.demo-corp.example"
+        }
+      ]
+    meta:
+      description: Sent by Concert's Renew certificate dialog (one certificate). The default is the expired Juice Shop certificate, for dry runs from the editor.
+  - name: dry_run
+    required: true
+    isInput: true
+    isOutput: false
+    level: INTERMEDIATE
+    type:
+      type: boolean
+    value: "true"
+    meta:
+      description: true = only check the cluster connection and show the Job that would be created. false = renew.
+  - name: k8s_auth
+    required: false
+    isInput: true
+    isOutput: false
+    level: INTERMEDIATE
+    type:
+      type: string
+    value: "\"admin/eks-demo-apps\""
+    meta:
+      description: Kubernetes authentication for the EKS API (SA demo-apps/concert-workflows)
+  - name: namespace
+    required: false
+    isInput: true
+    isOutput: false
+    level: INTERMEDIATE
+    type:
+      type: string
+    value: "\"demo-apps\""
+  - name: source
+    required: false
+    isInput: true
+    isOutput: false
+    level: INTERMEDIATE
+    type:
+      type: string
+    value: "\"EKS TLS secret\""
+    meta:
+      description: Certificate source name registered in Certificate_Flow_Orchestrator; written to the new record's metadata.source
+  - name: plan
+    required: false
+    isInput: false
+    isOutput: false
+    level: INTERMEDIATE
+    type:
+      type: any
+    value: "{}"
+  - name: result
+    required: false
+    isInput: false
+    isOutput: true
+    level: INTERMEDIATE
+    type:
+      type: any
+    value: "\"\""
+blocks:
+  - name: Build_Renewal_Job
+    function: |
+      // Work out what to renew from the certificate Concert sent, and build the Kubernetes Job.
+      const cert = (Array.isArray($certificates) ? $certificates[0] : $certificates) || {};
+      const subject = String(cert.subject || "");
+      const cnMatch = subject.match(/CN=([^,]+)/);
+      if (!cnMatch) {
+          throw new Error("No CN in certificate subject: " + subject);
+      }
+      const cn = cnMatch[1].trim();
+      const app = cn.split(".")[0].toLowerCase().replace(/[^a-z0-9-]/g, "-");
+      const jobName = ("renew-" + app + "-" + Date.now().toString(36)).slice(0, 63);
+      const env = (name, value) => ({ name, value: String(value) });
+      const fromSecret = key => ({ name: key, valueFrom: { secretKeyRef: { name: "concert-api", key } } });
+      $plan = {
+          cn,
+          app,
+          oldSerial: String(cert.serial_number || ""),
+          kubernetesSecret: $namespace + "/" + app + "-tls",
+          job: {
+              apiVersion: "batch/v1",
+              kind: "Job",
+              metadata: { name: jobName, labels: { app, "app.kubernetes.io/managed-by": "concert-workflows" } },
+              spec: {
+                  backoffLimit: 0,
+                  ttlSecondsAfterFinished: 3600,
+                  template: {
+                      metadata: { labels: { app: "cert-renewer" } },
+                      spec: {
+                          serviceAccountName: "cert-renewer",
+                          restartPolicy: "Never",
+                          containers: [{
+                              name: "renew",
+                              image: "alpine:3.20",
+                              command: ["sh", "/scripts/renew.sh"],
+                              env: [
+                                  env("CN", cn), env("APP", app), env("ACCESS_POINT", app + "-web"),
+                                  env("OLD_SERIAL", cert.serial_number || ""), env("SOURCE", $source),
+                                  env("ENVIRONMENT", "production-eks"),
+                                  fromSecret("CONCERT_URL"), fromSecret("CONCERT_API_KEY"), fromSecret("CONCERT_INSTANCE_ID")
+                              ],
+                              volumeMounts: [{ name: "script", mountPath: "/scripts" }]
+                          }],
+                          volumes: [{ name: "script", configMap: { name: "cert-renewer-script" } }]
+                      }
+                  }
+              }
+          }
+      };
+  - action: if
+    name: If_Dry_Run
+    condition: $dry_run === true || $dry_run === "true"
+    then:
+      - action: system/Kubernetes/apps_v1/readAppsV1NamespacedDeploymentStatus
+        name: Check_Cluster_Access
+        inputs:
+          - name: authKey
+            value: $k8s_auth
+          - name: name
+            value: $plan.app
+          - name: namespace
+            value: $namespace
+      - action: assign
+        name: Dry_Run_Result
+        variable: $result
+        value: |-
+          {
+              "mode": "DRY RUN - nothing was changed",
+              "certificate": "CN=" + $plan.cn,
+              "oldSerial": $plan.oldSerial,
+              "clusterCheck": "deployment " + $namespace + "/" + $plan.app + " readable, ready replicas: " + ($Check_Cluster_Access.result?.status?.readyReplicas ?? 0),
+              "wouldCreateJob": $plan.job.metadata.name,
+              "wouldWriteSecret": $plan.kubernetesSecret,
+              "wouldUploadToConcert": "new certificate record (365 days, source " + $source + ") and delete record " + $plan.oldSerial,
+              "jobManifest": $plan.job
+          }
+    else:
+      - action: system/Kubernetes/batch_v1/createBatchV1NamespacedJob
+        name: Create_Renewal_Job
+        inputs:
+          - name: authKey
+            value: $k8s_auth
+          - name: namespace
+            value: $namespace
+          - name: body
+            value: $plan.job
+      - action: assign
+        name: Renewal_Started
+        variable: $result
+        value: |-
+          {
+              "mode": "RENEWAL STARTED",
+              "certificate": "CN=" + $plan.cn,
+              "job": $namespace + "/" + $plan.job.metadata.name,
+              "secret": $plan.kubernetesSecret,
+              "note": "The Job issues the new certificate, stores the Secret, uploads it to Concert and removes the expired record. Follow it with: kubectl -n " + $namespace + " logs job/" + $plan.job.metadata.name
+          }
+meta:
+  workerGroup: default
+  description: "Renews a demo TLS certificate on EKS from Concert's Renew certificate dialog: a Kubernetes Job issues a new 365-day certificate, stores it as Secret <app>-tls in demo-apps, uploads the record to Concert and removes the expired one. dry_run=true (default) only checks access and shows the plan."
+  layout: flow

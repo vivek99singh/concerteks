@@ -1,0 +1,144 @@
+# Creates the EKS cluster and installs IBM Concert 3.1.0 (Hub + Concert + Data Apps + Workflows) on it.
+# Same stages as run-all.sh: cluster -> install (in-cluster Job) -> post-install.
+# Demo data needs a Concert API key from the UI, so it is a separate workflow (demo-data.yml).
+name: Install Concert on EKS
+
+on:
+  workflow_dispatch:
+    inputs:
+      cluster:
+        description: EKS cluster name
+        default: concert-demo
+      region:
+        description: AWS region
+        default: us-east-1
+      node_az:
+        description: AZ for the nodes (EBS volumes are zonal)
+        default: us-east-1b
+      capacity_type:
+        description: Node capacity type (Spot was unstable in us-east-1b; use ON_DEMAND for demos)
+        type: choice
+        options: [ON_DEMAND, SPOT]
+        default: ON_DEMAND
+      node_count:
+        description: Nodes (16 vCPU each; the full install requests ~34 vCPU, so at least 3)
+        default: "3"
+      concert_version:
+        description: Concert package version
+        default: v3.1.0
+      start_from:
+        description: First stage to run (later stages always run)
+        type: choice
+        options: [cluster, install, post-install]
+        default: cluster
+
+# One pipeline per cluster at a time; never cancel a running install
+concurrency:
+  group: concert-eks-${{ inputs.cluster }}
+  cancel-in-progress: false
+
+env:
+  CLUSTER: ${{ inputs.cluster }}
+  REGION: ${{ inputs.region }}
+  NODE_AZ: ${{ inputs.node_az }}
+
+jobs:
+  cluster:
+    name: 1. EKS cluster + EFS
+    if: inputs.start_from == 'cluster'
+    runs-on: ${{ fromJSON(vars.RUNNER_LABELS || '"ubuntu-latest"') }}
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          region: ${{ inputs.region }}
+          cluster: ${{ inputs.cluster }}
+          kubeconfig: "false"
+      - name: Create cluster, add-ons, node group, EFS
+        env:
+          CAPACITY_TYPE: ${{ inputs.capacity_type }}
+          NODE_COUNT: ${{ inputs.node_count }}
+          EXTRA_ADMIN_ARNS: ${{ vars.EXTRA_ADMIN_ARNS }}
+        run: ./scripts/00-create-cluster.sh
+
+  install:
+    name: 2. Concert install (in-cluster Job)
+    needs: cluster
+    if: ${{ !cancelled() && !failure() && inputs.start_from != 'post-install' }}
+    runs-on: ${{ fromJSON(vars.RUNNER_LABELS || '"ubuntu-latest"') }}
+    # The installer Job itself has a 2 h deadline. If this runner job dies, the install keeps
+    # going in the cluster; re-run with start_from=install to re-attach to its logs.
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          region: ${{ inputs.region }}
+          cluster: ${{ inputs.cluster }}
+      - name: Run installer
+        env:
+          IBM_ENTITLEMENT_KEY: ${{ secrets.IBM_ENTITLEMENT_KEY }}
+          WATSONX_API_KEY: ${{ secrets.WATSONX_API_KEY }}
+          WATSONX_API_PROJECT_ID: ${{ secrets.WATSONX_API_PROJECT_ID }}
+          WATSONX_API_URL: ${{ vars.WATSONX_API_URL || 'https://eu-gb.ml.cloud.ibm.com' }}
+          CONCERT_ADMIN_PASSWORD: ${{ secrets.CONCERT_ADMIN_PASSWORD }}
+          CONCERT_VERSION: ${{ inputs.concert_version }}
+        run: ./scripts/01-install-in-cluster.sh
+      - name: Upload installer log
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v3
+        with:
+          name: concert-install-log
+          path: logs/
+
+  post-install:
+    name: 3. Ingress, SSO, watsonx, health
+    needs: install
+    if: ${{ !cancelled() && !failure() }}
+    runs-on: ${{ fromJSON(vars.RUNNER_LABELS || '"ubuntu-latest"') }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          region: ${{ inputs.region }}
+          cluster: ${{ inputs.cluster }}
+      - name: Post-install
+        env:
+          CONCERT_ADMIN_PASSWORD: ${{ secrets.CONCERT_ADMIN_PASSWORD }}
+          WATSONX_API_KEY: ${{ secrets.WATSONX_API_KEY }}
+          WATSONX_API_PROJECT_ID: ${{ secrets.WATSONX_API_PROJECT_ID }}
+          WATSONX_API_URL: ${{ vars.WATSONX_API_URL || 'https://eu-gb.ml.cloud.ibm.com' }}
+        run: ./scripts/02-post-install.sh
+      - name: Wait for Concert to answer
+        run: |
+          host=$(kubectl get svc -n concert-ingress-nginx concert-ingress-nginx-controller -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+          wf=$(kubectl get svc -A --field-selector metadata.name=solis-gw-ext -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}' || true)
+          code=""
+          for _ in $(seq 1 40); do
+            code=$(curl -ks -o /dev/null -w '%{http_code}' --max-time 10 "https://$host/" || true)
+            [[ $code =~ ^(200|30[0-9]|401)$ ]] && break
+            sleep 15
+          done
+          [[ $code =~ ^(200|30[0-9]|401)$ ]] || { echo "Concert did not answer (last HTTP ${code:-none})"; kubectl get pods -A | grep -Ev 'Running|Completed'; exit 1; }
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          ## Concert is up on \`$CLUSTER\`
+          | | URL |
+          |---|---|
+          | Concert | https://$host (Log in with SSO, user \`admin\`) |
+          | Workflows | https://$wf |
+
+          **Next (manual, ~10 min):** generate an API key in Concert (profile → API key), save it as the
+          \`CONCERT_API_KEY\` repo secret, then run **Load demo data**. See README §2 for the other UI steps.
+          EOF

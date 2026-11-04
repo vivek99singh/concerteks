@@ -1,0 +1,63 @@
+name: Set up AWS + Kubernetes tooling
+description: Installs aws/kubectl/helm (and optionally trivy/semgrep) if missing, exports AWS credentials, and points kubectl at the cluster.
+inputs:
+  aws-access-key-id:     {required: true}
+  aws-secret-access-key: {required: true}
+  aws-session-token:     {required: false, default: ""}
+  region:                {required: true}
+  cluster:               {required: true}
+  kubeconfig:            {description: "Run aws eks update-kubeconfig", required: false, default: "true"}
+  demo-tools:            {description: "Also install trivy and semgrep (demo-data)", required: false, default: "false"}
+runs:
+  using: composite
+  steps:
+    - name: Tools
+      shell: bash
+      run: |
+        set -euo pipefail
+        BIN=$HOME/.local/bin; mkdir -p "$BIN"; echo "$BIN" >> "$GITHUB_PATH"; export PATH=$BIN:$PATH
+        ARCH=$(uname -m); [[ $ARCH == x86_64 ]] && KARCH=amd64 || KARCH=arm64
+        if ! command -v aws >/dev/null; then
+          curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-$ARCH.zip" -o /tmp/awscli.zip
+          (cd /tmp && unzip -q -o awscli.zip && ./aws/install -i "$HOME/.local/aws-cli" -b "$BIN" --update)
+        fi
+        if ! command -v kubectl >/dev/null; then
+          curl -fsSL -o "$BIN/kubectl" "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/$KARCH/kubectl"
+          chmod +x "$BIN/kubectl"
+        fi
+        if ! command -v helm >/dev/null; then
+          curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | HELM_INSTALL_DIR=$BIN USE_SUDO=false bash
+        fi
+        if [[ "${{ inputs.demo-tools }}" == true ]]; then
+          command -v trivy >/dev/null || curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b "$BIN"
+          command -v semgrep >/dev/null || python3 -m pip install --user --quiet semgrep || echo "semgrep not installed; SAST step will be skipped"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          docker version >/dev/null || { echo "docker is required for the Concert toolkit"; exit 1; }
+        fi
+        for t in aws kubectl helm python3 curl; do command -v $t >/dev/null || { echo "missing $t"; exit 1; }; done
+        aws --version; kubectl version --client=true | head -1; helm version --short
+    - name: AWS credentials
+      shell: bash
+      env:
+        KEY_ID: ${{ inputs.aws-access-key-id }}
+        SECRET: ${{ inputs.aws-secret-access-key }}
+        TOKEN: ${{ inputs.aws-session-token }}
+      run: |
+        set -euo pipefail
+        [[ -n $KEY_ID && -n $SECRET ]] || { echo "AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY secrets are not set"; exit 1; }
+        {
+          echo "AWS_ACCESS_KEY_ID=$KEY_ID"
+          echo "AWS_SECRET_ACCESS_KEY=$SECRET"
+          [[ -n $TOKEN ]] && echo "AWS_SESSION_TOKEN=$TOKEN"
+          echo "AWS_DEFAULT_REGION=${{ inputs.region }}"
+          echo "AWS_PAGER="
+        } >> "$GITHUB_ENV"
+        export AWS_ACCESS_KEY_ID=$KEY_ID AWS_SECRET_ACCESS_KEY=$SECRET AWS_DEFAULT_REGION=${{ inputs.region }}
+        [[ -n $TOKEN ]] && export AWS_SESSION_TOKEN=$TOKEN
+        aws sts get-caller-identity --query Arn --output text
+    - name: kubeconfig
+      if: inputs.kubeconfig == 'true'
+      shell: bash
+      run: |
+        aws eks update-kubeconfig --name "${{ inputs.cluster }}" --region "${{ inputs.region }}"
+        kubectl get nodes -o wide

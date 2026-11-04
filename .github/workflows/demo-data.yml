@@ -1,0 +1,60 @@
+# Deploys juice-shop / WebGoat / WrongSecrets, scans them and uploads apps, scans and certificates to Concert.
+# Run after install.yml, once the CONCERT_API_KEY secret is set (Concert UI -> profile -> API key).
+name: Load demo data
+
+on:
+  workflow_dispatch:
+    inputs:
+      cluster:
+        description: EKS cluster name
+        default: concert-demo
+      region:
+        description: AWS region
+        default: us-east-1
+      step:
+        description: load-demo-data.sh step
+        type: choice
+        options: [all, deploy, scan, sbom, certs, upload, upload-deploy, compliance, upload-compliance]
+        default: all
+      allowed_cidr:
+        description: CIDR allowed to reach the demo app LBs (your IP/32). Empty = repo variable DEMO_ALLOWED_CIDR
+        default: ""
+      cert_renewal:
+        description: Also run 05-cert-renewal-setup.sh (cluster side of the Renew_EKS_TLS_Certificate workflow)
+        type: boolean
+        default: true
+
+concurrency:
+  group: concert-eks-${{ inputs.cluster }}
+  cancel-in-progress: false
+
+jobs:
+  demo-data:
+    runs-on: ${{ fromJSON(vars.RUNNER_LABELS || '"ubuntu-latest"') }}
+    timeout-minutes: 90
+    env:
+      CLUSTER: ${{ inputs.cluster }}
+      REGION: ${{ inputs.region }}
+      CONCERT_API_KEY: ${{ secrets.CONCERT_API_KEY }}
+      GITHUB_USER: ${{ vars.DEMO_GITHUB_USER || 'vivek99singh' }}
+      DEMO_ALLOWED_CIDR: ${{ inputs.allowed_cidr || vars.DEMO_ALLOWED_CIDR }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          region: ${{ inputs.region }}
+          cluster: ${{ inputs.cluster }}
+          demo-tools: "true"
+      - name: Check inputs
+        run: |
+          [[ -n $CONCERT_API_KEY ]] || { echo "Set the CONCERT_API_KEY secret first (Concert UI -> profile -> API key)"; exit 1; }
+          [[ -n $DEMO_ALLOWED_CIDR ]] || echo "::warning::No allowed_cidr / DEMO_ALLOWED_CIDR: the demo apps will only be reachable from this runner's IP"
+      - name: load-demo-data.sh ${{ inputs.step }}
+        working-directory: demo-data
+        run: ./load-demo-data.sh "${{ inputs.step }}"
+      - name: Certificate renewal setup
+        if: inputs.cert_renewal && (inputs.step == 'all' || inputs.step == 'deploy')
+        run: ./scripts/05-cert-renewal-setup.sh

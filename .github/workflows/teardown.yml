@@ -1,0 +1,53 @@
+# Deletes the cluster and everything that costs money (ELBs, node group, cluster, EFS, leftover EBS).
+# IAM roles are kept. Requires typing the cluster name.
+name: Teardown EKS
+
+on:
+  workflow_dispatch:
+    inputs:
+      cluster:
+        description: EKS cluster name
+        default: concert-demo
+      region:
+        description: AWS region
+        default: us-east-1
+      confirm:
+        description: Type the cluster name again to confirm deletion
+        required: true
+
+concurrency:
+  group: concert-eks-${{ inputs.cluster }}
+  cancel-in-progress: false
+
+jobs:
+  teardown:
+    runs-on: ${{ fromJSON(vars.RUNNER_LABELS || '"ubuntu-latest"') }}
+    timeout-minutes: 60
+    env:
+      CLUSTER: ${{ inputs.cluster }}
+      REGION: ${{ inputs.region }}
+    steps:
+      - name: Confirm
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          [[ $CONFIRM == "$CLUSTER" ]] || { echo "Confirmation does not match the cluster name"; exit 1; }
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          region: ${{ inputs.region }}
+          cluster: ${{ inputs.cluster }}
+          kubeconfig: "false"
+      - name: Teardown
+        env:
+          CONFIRM_CLUSTER: ${{ inputs.confirm }}
+        run: ./scripts/99-teardown.sh
+      - name: Remaining k8s-elb security groups
+        run: |
+          # 99-teardown.sh leaves these behind; they are listed here (not deleted) because they are shared by name pattern
+          VPC=$(aws ec2 describe-vpcs --filters Name=is-default,Values=true --query 'Vpcs[0].VpcId' --output text)
+          aws ec2 describe-security-groups --filters Name=vpc-id,Values="$VPC" Name=tag-key,Values="kubernetes.io/cluster/$CLUSTER" \
+            --query 'SecurityGroups[].[GroupId,GroupName]' --output text || true

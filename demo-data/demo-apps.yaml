@@ -1,0 +1,101 @@
+# The three demo applications, running on the same EKS cluster as Concert.
+# They are INTENTIONALLY VULNERABLE. Each LoadBalancer accepts traffic only from __MY_CIDR__
+# (filled in by load-demo-data.sh with your current public IP). Never open them to 0.0.0.0/0.
+# One replica each, on purpose: the Resilience story is "single-AZ, no redundancy" -> fix with a Workflow.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo-apps
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: juice-shop
+  namespace: demo-apps
+  labels: {app: juice-shop}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: juice-shop}}
+  template:
+    metadata: {labels: {app: juice-shop}}
+    spec:
+      containers:
+      - name: juice-shop
+        image: bkimminich/juice-shop:latest
+        ports: [{containerPort: 3000}]
+        resources:
+          requests: {cpu: 100m, memory: 256Mi}
+          limits: {memory: 768Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: juice-shop
+  namespace: demo-apps
+spec:
+  type: LoadBalancer
+  loadBalancerSourceRanges: ["__MY_CIDR__"]
+  selector: {app: juice-shop}
+  ports: [{port: 80, targetPort: 3000}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webgoat
+  namespace: demo-apps
+  labels: {app: webgoat}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: webgoat}}
+  template:
+    metadata: {labels: {app: webgoat}}
+    spec:
+      containers:
+      - name: webgoat
+        image: webgoat/webgoat:latest
+        ports: [{containerPort: 8080}]
+        resources:
+          requests: {cpu: 200m, memory: 768Mi}
+          limits: {memory: 1536Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: webgoat
+  namespace: demo-apps
+spec:
+  type: LoadBalancer
+  loadBalancerSourceRanges: ["__MY_CIDR__"]
+  selector: {app: webgoat}
+  ports: [{port: 80, targetPort: 8080}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wrongsecrets
+  namespace: demo-apps
+  labels: {app: wrongsecrets}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: wrongsecrets}}
+  template:
+    metadata: {labels: {app: wrongsecrets}}
+    spec:
+      containers:
+      - name: wrongsecrets
+        image: jeroenwillemsen/wrongsecrets:latest-no-vault
+        ports: [{containerPort: 8080}]
+        resources:
+          requests: {cpu: 200m, memory: 768Mi}
+          limits: {memory: 1536Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: wrongsecrets
+  namespace: demo-apps
+spec:
+  type: LoadBalancer
+  loadBalancerSourceRanges: ["__MY_CIDR__"]
+  selector: {app: wrongsecrets}
+  ports: [{port: 80, targetPort: 8080}]
