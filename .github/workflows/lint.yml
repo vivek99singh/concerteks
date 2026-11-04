@@ -19,7 +19,7 @@ jobs:
           done
           exit $rc
       - name: Python syntax
-        run: python3 -m py_compile scripts/*.py demo-data/*.py build_recording_script.py
+        run: python3 -m py_compile scripts/*.py demo-data/*.py
       - name: shellcheck (errors only)
         run: |
           command -v shellcheck >/dev/null || { echo "shellcheck not installed on this runner; skipped"; exit 0; }
